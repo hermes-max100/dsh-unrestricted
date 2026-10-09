@@ -52,7 +52,8 @@
     "test": "node --test tests/*.spec.mjs",
     "dump-prompts": "node tools/dump-prompts.mjs --repo ../../deepseek-harness --out tests/fixtures",
     "higgsfield:example": "node --env-file=.env.local index.ts",
-    "higgsfield:typecheck": "tsc -p tsconfig.higgsfield.json"
+    "runway:example": "node --env-file=.env.local runway.ts",
+    "examples:typecheck": "tsc -p tsconfig.examples.json"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
@@ -64,6 +65,7 @@
     "typescript": "^5.6.0"
   },
   "dependencies": {
-    "@higgsfield/client": "^0.2.6"
+    "@higgsfield/client": "^0.2.6",
+    "@runwayml/sdk": "^4.21.0"
   }
 }

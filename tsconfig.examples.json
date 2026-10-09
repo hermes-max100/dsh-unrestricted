@@ -9,5 +9,5 @@
     "types": ["node"],
     "allowImportingTsExtensions": true
   },
-  "include": ["index.ts"]
+  "include": ["index.ts", "runway.ts", "lib/**/*.ts"]
 }

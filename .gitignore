@@ -4,3 +4,6 @@ node_modules/
 .env
 .env.local
 .env*.local
+
+# Local spend ledger (operational data, not source)
+.cost-ledger.jsonl

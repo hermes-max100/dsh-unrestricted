@@ -14,6 +14,7 @@ import {
   type V2Response,
   type V2RequestStatus,
 } from '@higgsfield/client/v2'
+import { record } from './lib/cost-ledger.ts'
 
 const MODEL = 'bytedance/seedance-2.5/text-to-video'
 
@@ -72,16 +73,46 @@ switch (status) {
       // Completed but no asset: a success claim here would be false.
       fail('Status is "completed" but no video URL was returned.', result)
     }
+    // Higgsfield's v2 response carries no cost field, so credits/usd are
+    // recorded as null rather than estimated from a published rate.
+    await record({
+      provider: 'higgsfield',
+      model: MODEL,
+      credits: null,
+      usd: null,
+      requestId: result.request_id,
+      status,
+      durationSeconds: INPUT.duration,
+      resolution: INPUT.resolution,
+    })
     console.log('✓ Generation completed')
     console.log(`  video: ${url}`)
     break
   }
 
   case 'failed':
+    await record({
+      provider: 'higgsfield',
+      model: MODEL,
+      credits: null,
+      usd: null,
+      requestId: result.request_id,
+      status,
+      note: 'generation failed',
+    })
     fail('Generation failed.', result)
 
   case 'nsfw':
     // 'nsfw' is this API's moderation outcome — a rejection, not a success.
+    await record({
+      provider: 'higgsfield',
+      model: MODEL,
+      credits: null,
+      usd: null,
+      requestId: result.request_id,
+      status,
+      note: 'rejected by content moderation',
+    })
     fail('Generation was rejected by content moderation (status "nsfw").', result)
 
   case 'queued':

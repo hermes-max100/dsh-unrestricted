@@ -11,6 +11,9 @@ importers:
       '@higgsfield/client':
         specifier: ^0.2.6
         version: 0.2.6
+      '@runwayml/sdk':
+        specifier: ^4.21.0
+        version: 4.21.0
     devDependencies:
       '@types/node':
         specifier: ^22.20.1
@@ -138,6 +141,10 @@ packages:
 
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
+
+  '@runwayml/sdk@4.21.0':
+    resolution: {integrity: sha512-D29BltR7siB9EqYBKlOTdD11zroZWrYrjKEQbUbmbdUABbdYNu68xmjkqe7GJGxYyNjIaso+4tl5Yy3Kb8TFVw==}
+    hasBin: true
 
   '@types/node@22.20.1':
     resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
@@ -650,6 +657,8 @@ snapshots:
     optional: true
 
   '@rolldown/pluginutils@1.0.1': {}
+
+  '@runwayml/sdk@4.21.0': {}
 
   '@types/node@22.20.1':
     dependencies:
