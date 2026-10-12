@@ -165,6 +165,55 @@ test('normalize-still refuses a non-image input', async () => {
   assert.match(r.out, /not a readable image/)
 })
 
+const PERF = (id, over = {}) => [
+  'record-performance', id,
+  '--posted-at', over.postedAt ?? new Date(Date.now() - 72 * 3600_000).toISOString(),
+  '--reach', String(over.reach ?? 40000),
+  '--views', String(over.views ?? 50000),
+  '--avg-watch-time', String(over.watch ?? 3.5),
+  '--duration', String(over.duration ?? 5),
+  '--interactions', String(over.interactions ?? 2000),
+]
+
+test('record-performance stores a measurement and reports the watch fraction', async () => {
+  const r = await cli(...PERF('reel-1'))
+  assert.equal(r.code, 0, r.out)
+  assert.match(r.out, /recorded reel-1/)
+  assert.match(r.out, /70\.0%/, '3.5s of 5s')
+})
+
+test('record-performance refuses incomplete or impossible input', async () => {
+  assert.equal((await cli('record-performance', 'x', '--views', '10')).code, 1)
+  const transposed = await cli(...PERF('reel-2', { views: 10, reach: 5000 }))
+  assert.equal(transposed.code, 1)
+  assert.match(transposed.out, /transposed/)
+})
+
+test('select-winner declines on an empty log without spending', async () => {
+  const r = await cli('select-winner')
+  assert.equal(r.code, 0, 'declining is a successful outcome')
+  assert.match(r.out, /no winner this cycle/)
+  assert.match(r.out, /no performance data/)
+})
+
+test('select-winner picks the better clip once measurements exist', async () => {
+  await cli(...PERF('dud', { watch: 0.4 }))
+  await cli(...PERF('hit', { watch: 4.2 }))
+  const r = await cli('select-winner')
+  assert.equal(r.code, 0, r.out)
+  assert.match(r.out, /winner: hit/)
+  assert.match(r.out, /commission \d+ variant/)
+})
+
+test('select-winner declines when every clip is weak', async () => {
+  await cli(...PERF('weak-a', { watch: 0.3 }))
+  await cli(...PERF('weak-b', { watch: 0.5 }))
+  const r = await cli('select-winner')
+  assert.equal(r.code, 0)
+  assert.match(r.out, /no winner this cycle/)
+  assert.match(r.out, /not amplifying noise/)
+})
+
 test('an unknown command prints usage and exits non-zero', async () => {
   const r = await cli('frobnicate')
   assert.equal(r.code, 1)

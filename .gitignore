@@ -8,3 +8,4 @@ node_modules/
 # Local spend ledger (operational data, not source)
 .cost-ledger.jsonl
 .approval-queue.jsonl
+.performance.jsonl

@@ -1,153 +1,177 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  selectWinner,
-  scoreEligible,
-  wilsonLowerBound,
-  DEFAULT_POLICY,
+  selectWinner, scoreEligible, hoeffdingLowerBound, wilsonLowerBound, DEFAULT_POLICY,
 } from '../lib/select-winner.ts'
 
-const NOW = new Date('2026-10-10T12:00:00Z')
+const NOW = new Date('2026-10-12T12:00:00Z')
 const hoursAgo = (h) => new Date(NOW.getTime() - h * 3_600_000).toISOString()
 
-/** A clip that comfortably clears every gate. */
+/** A clip comfortably clearing every gate: 5s reel watched ~3.5s on average. */
 const clip = (over = {}) => ({
   clipId: 'c1',
-  postedAt: hoursAgo(24),
-  impressions: 50_000,
-  views: 10_000,
-  completions: 5_000,
-  engagements: 500,
+  postedAt: hoursAgo(72),
+  reach: 40_000,
+  views: 50_000,
+  avgWatchTimeSeconds: 3.5,
+  durationSeconds: 5,
+  interactions: 2_000,
   ...over,
 })
 
-test('wilsonLowerBound penalises small samples', () => {
-  const tiny = wilsonLowerBound(2, 2, 1.96) // perfect, n=2
-  const large = wilsonLowerBound(800, 1000, 1.96) // 80%, n=1000
-  assert.ok(
-    tiny < large,
-    `2/2 (${tiny.toFixed(3)}) must not outrank 800/1000 (${large.toFixed(3)})`,
-  )
+test('hoeffdingLowerBound penalises small samples', () => {
+  const tiny = hoeffdingLowerBound(1.0, 4, 0.05)
+  const large = hoeffdingLowerBound(0.8, 10_000, 0.05)
+  assert.ok(tiny < large, `4 views (${tiny.toFixed(3)}) must not outrank 10k (${large.toFixed(3)})`)
 })
 
-test('wilsonLowerBound stays within [0,1] and handles edges', () => {
-  assert.equal(wilsonLowerBound(0, 0, 1.96), 0, 'no data scores 0')
-  assert.equal(wilsonLowerBound(0, 100, 1.96), 0, 'zero successes scores 0')
-  const perfect = wilsonLowerBound(1000, 1000, 1.96)
-  assert.ok(perfect > 0.99 && perfect <= 1, `got ${perfect}`)
-  assert.throws(() => wilsonLowerBound(5, 2, 1.96), RangeError)
+test('hoeffdingLowerBound stays in [0,1] and handles edges', () => {
+  assert.equal(hoeffdingLowerBound(0.9, 0, 0.05), 0, 'no samples scores 0')
+  assert.equal(hoeffdingLowerBound(0, 1_000, 0.05), 0)
+  assert.ok(hoeffdingLowerBound(1, 1_000_000, 0.05) > 0.99)
+  assert.throws(() => hoeffdingLowerBound(0.5, 10, 0), RangeError)
+  assert.throws(() => hoeffdingLowerBound(0.5, 10, 1), RangeError)
 })
 
-test('a higher z makes the bound stricter', () => {
-  assert.ok(wilsonLowerBound(80, 100, 2.58) < wilsonLowerBound(80, 100, 1.96))
+test('a looping clip whose watch time exceeds its duration clamps to the top', () => {
+  // Instagram counts replays, so avg watch time can exceed duration.
+  const looped = hoeffdingLowerBound(1.4, 50_000, 0.05)
+  const exact = hoeffdingLowerBound(1.0, 50_000, 0.05)
+  assert.equal(looped, exact, 'clamped, not allowed to exceed 1')
+  assert.ok(looped > 0.99)
+})
+
+test('a stricter delta lowers the bound', () => {
+  assert.ok(hoeffdingLowerBound(0.8, 1_000, 0.001) < hoeffdingLowerBound(0.8, 1_000, 0.05))
 })
 
 test('no data means no winner and no spend', () => {
-  const result = selectWinner([], DEFAULT_POLICY, NOW)
-  assert.equal(result.kind, 'no-winner')
-  assert.equal(result.evaluated, 0)
-  assert.match(result.reason, /no performance data/)
+  const r = selectWinner([], DEFAULT_POLICY, NOW)
+  assert.equal(r.kind, 'no-winner')
+  assert.equal(r.evaluated, 0)
+  assert.match(r.reason, /no performance data/)
 })
 
-test('under-exposed clips are not eligible', () => {
-  const result = selectWinner([clip({ impressions: 10, views: 5, completions: 5 })], DEFAULT_POLICY, NOW)
-  assert.equal(result.kind, 'no-winner')
-  assert.equal(result.eligible, 0)
-  assert.match(result.reason, /impressions/)
+test('an under-reached clip is not eligible', () => {
+  const r = selectWinner([clip({ reach: 10, views: 600 })], DEFAULT_POLICY, NOW)
+  assert.equal(r.kind, 'no-winner')
+  assert.equal(r.eligible, 0)
+  assert.match(r.reason, /reach/)
 })
 
-test('clips that are too young or too stale are not eligible', () => {
-  const young = selectWinner([clip({ postedAt: hoursAgo(1) })], DEFAULT_POLICY, NOW)
-  assert.equal(young.kind, 'no-winner', 'a 1h-old clip has immature metrics')
-  const stale = selectWinner([clip({ postedAt: hoursAgo(500) })], DEFAULT_POLICY, NOW)
-  assert.equal(stale.kind, 'no-winner', 'a 500h-old clip is past its window')
+test('a clip reached widely but barely viewed is not eligible', () => {
+  const r = selectWinner([clip({ reach: 40_000, views: 50 })], DEFAULT_POLICY, NOW)
+  assert.equal(r.kind, 'no-winner')
+  assert.equal(r.eligible, 0)
 })
 
-test('a well-exposed low-retention clip is refused, not amplified', () => {
-  // 5% retention over 10k views: plenty of data, genuinely bad.
-  const result = selectWinner([clip({ completions: 500 })], DEFAULT_POLICY, NOW)
-  assert.equal(result.kind, 'no-winner')
-  assert.equal(result.eligible, 1, 'it was evaluated, then rejected on quality')
-  assert.match(result.reason, /not amplifying noise/)
+test('a clip younger than the 48h insights lag is not eligible', () => {
+  const r = selectWinner([clip({ postedAt: hoursAgo(24) })], DEFAULT_POLICY, NOW)
+  assert.equal(r.kind, 'no-winner', 'Instagram data lags up to 48h; 24h is immature')
+  assert.equal(DEFAULT_POLICY.minAgeHours, 48)
+})
+
+test('a stale clip past its trend window is not eligible', () => {
+  const r = selectWinner([clip({ postedAt: hoursAgo(500) })], DEFAULT_POLICY, NOW)
+  assert.equal(r.kind, 'no-winner')
+})
+
+test('a well-sampled low-retention clip is refused, not amplified', () => {
+  // 0.5s average on a 5s reel: ample data, genuinely bad.
+  const r = selectWinner([clip({ avgWatchTimeSeconds: 0.5 })], DEFAULT_POLICY, NOW)
+  assert.equal(r.kind, 'no-winner')
+  assert.equal(r.eligible, 1, 'evaluated, then rejected on quality')
+  assert.match(r.reason, /not amplifying noise/)
 })
 
 test('a genuine winner is selected with a bounded variant count', () => {
-  const result = selectWinner([clip()], DEFAULT_POLICY, NOW)
-  assert.equal(result.kind, 'winner')
-  assert.equal(result.clip.clipId, 'c1')
-  assert.ok(result.score > 0.25, `score ${result.score}`)
-  assert.ok(result.variants >= 1 && result.variants <= DEFAULT_POLICY.maxVariants)
-  assert.match(result.reason, /confident retention/)
+  const r = selectWinner([clip()], DEFAULT_POLICY, NOW)
+  assert.equal(r.kind, 'winner')
+  assert.equal(r.clip.clipId, 'c1')
+  assert.ok(r.score > DEFAULT_POLICY.minWatchFractionLowerBound)
+  assert.ok(r.variants >= 1 && r.variants <= DEFAULT_POLICY.maxVariants)
+  assert.match(r.reason, /confident watch fraction/)
 })
 
-test('the large confident sample beats the tiny perfect one end to end', () => {
-  // This is the exact failure `generated_videos[0]` produced: a fluke clip
-  // with 3/3 completions getting a ten-variant budget.
-  const fluke = clip({ clipId: 'fluke', impressions: 1_200, views: 3, completions: 3 })
-  const real = clip({ clipId: 'real', impressions: 80_000, views: 20_000, completions: 12_000 })
-  const result = selectWinner([fluke, real], DEFAULT_POLICY, NOW)
-  assert.equal(result.kind, 'winner')
-  assert.equal(result.clip.clipId, 'real', 'must not pick the 3-view fluke')
+test('between equal watch fractions, the larger sample wins', () => {
+  // This is the bound doing its job: identical raw means, different confidence.
+  const thin = clip({ clipId: 'thin', reach: 1_000, views: 520, avgWatchTimeSeconds: 4 })
+  const thick = clip({ clipId: 'thick', reach: 60_000, views: 80_000, avgWatchTimeSeconds: 4 })
+  const r = selectWinner([thin, thick], DEFAULT_POLICY, NOW)
+  assert.equal(r.kind, 'winner')
+  assert.equal(r.clip.clipId, 'thick', 'same 0.8 mean, more evidence')
 })
 
-test('a tiny-sample fluke alone is declined, not amplified', () => {
-  // Regression: this clip has 1,100 impressions (clears minImpressions) but
-  // only 4 views, so the Wilson denominator was tiny. Its bound of ~0.51
-  // cleared the 0.25 floor and it was selected as a winner.
-  const fluke = clip({ clipId: 'fluke', impressions: 1_100, views: 4, completions: 4 })
-  const result = selectWinner([fluke], DEFAULT_POLICY, NOW)
-  assert.equal(result.kind, 'no-winner', 'a 4-view clip must never be a winner')
-  assert.equal(result.eligible, 0, 'it must not even be scored')
-  assert.match(result.reason, /views/)
-})
-
-test('a clip served widely but barely watched is not eligible', () => {
-  const result = selectWinner(
-    [clip({ impressions: 100_000, views: 50, completions: 40 })],
+test('a sub-floor sample never reaches scoring at all', () => {
+  // The minViews gate, not the bound, is what stops a genuine fluke: a clip
+  // with 40 views and perfect watch time is excluded before it is scored.
+  const r = selectWinner(
+    [clip({ clipId: 'fluke', reach: 1_200, views: 40, avgWatchTimeSeconds: 5 })],
     DEFAULT_POLICY,
     NOW,
   )
-  assert.equal(result.kind, 'no-winner')
-  assert.equal(result.eligible, 0)
+  assert.equal(r.kind, 'no-winner')
+  assert.equal(r.eligible, 0, 'gated out, not merely outranked')
+})
+
+test('the bound bites hard below the gate and lightly above it', () => {
+  // Honest account of the division of labour: the Hoeffding penalty is large
+  // for tiny samples but only ~0.055 at the 500-view floor, so the gate is the
+  // primary protection and the bound is a graded safety net just above it.
+  const penalty = (n) => 1 - hoeffdingLowerBound(1, n, DEFAULT_POLICY.delta)
+  assert.ok(penalty(10) > 0.35, `n=10 penalty ${penalty(10).toFixed(3)}`)
+  assert.ok(penalty(100) > 0.1, `n=100 penalty ${penalty(100).toFixed(3)}`)
+  const atFloor = penalty(DEFAULT_POLICY.minViews)
+  assert.ok(atFloor > 0.04 && atFloor < 0.07, `at the floor the penalty is small: ${atFloor.toFixed(3)}`)
+  assert.ok(penalty(80_000) < 0.01, 'negligible at scale')
+})
+
+test('a thin but eligible clip may legitimately outrank a broader one', () => {
+  // Not a bug: 520 views at 100% watch is a well-sampled estimate, and the
+  // module ranks retention. Reach is a gate, not part of the score.
+  const thin = clip({ clipId: 'thin', reach: 1_000, views: 520, avgWatchTimeSeconds: 5 })
+  const broad = clip({ clipId: 'broad', reach: 60_000, views: 80_000, avgWatchTimeSeconds: 4 })
+  const r = selectWinner([thin, broad], DEFAULT_POLICY, NOW)
+  assert.equal(r.clip.clipId, 'thin')
 })
 
 test('a marginal winner earns fewer variants than a strong one', () => {
-  const marginal = selectWinner([clip({ completions: 3_000 })], DEFAULT_POLICY, NOW)
-  const strong = selectWinner([clip({ completions: 9_000 })], DEFAULT_POLICY, NOW)
+  const marginal = selectWinner([clip({ avgWatchTimeSeconds: 2.1 })], DEFAULT_POLICY, NOW)
+  const strong = selectWinner([clip({ avgWatchTimeSeconds: 4.8 })], DEFAULT_POLICY, NOW)
   assert.equal(marginal.kind, 'winner')
   assert.equal(strong.kind, 'winner')
-  assert.ok(
-    marginal.variants < strong.variants,
-    `marginal ${marginal.variants} should be < strong ${strong.variants}`,
-  )
+  assert.ok(marginal.variants < strong.variants,
+    `marginal ${marginal.variants} should be < strong ${strong.variants}`)
 })
 
-test('selection is deterministic for identical scores', () => {
-  const a = clip({ clipId: 'bbb' })
-  const b = clip({ clipId: 'aaa' })
+test('selection is deterministic regardless of input order', () => {
+  const a = clip({ clipId: 'bbb' }), b = clip({ clipId: 'aaa' })
   const first = selectWinner([a, b], DEFAULT_POLICY, NOW)
   const second = selectWinner([b, a], DEFAULT_POLICY, NOW)
-  assert.equal(first.kind, 'winner')
-  assert.equal(first.clip.clipId, second.clip.clipId, 'order must not change the pick')
+  assert.equal(first.clip.clipId, second.clip.clipId)
   assert.equal(first.clip.clipId, 'aaa', 'ties break on clipId')
 })
 
-test('zero-view clips cannot divide by zero', () => {
-  const result = selectWinner([clip({ views: 0, completions: 0 })], DEFAULT_POLICY, NOW)
-  assert.equal(result.kind, 'no-winner')
-  assert.ok(Number.isFinite(result.eligible))
+test('a zero-duration clip cannot divide by zero', () => {
+  const r = selectWinner([clip({ durationSeconds: 0 })], DEFAULT_POLICY, NOW)
+  assert.equal(r.kind, 'no-winner')
+  assert.equal(r.eligible, 0)
 })
 
 test('an invalid timestamp is rejected loudly, not silently skipped', () => {
-  assert.throws(
-    () => selectWinner([clip({ postedAt: 'not-a-date' })], DEFAULT_POLICY, NOW),
-    RangeError,
-  )
+  assert.throws(() => selectWinner([clip({ postedAt: 'whenever' })], DEFAULT_POLICY, NOW), RangeError)
 })
 
-test('scoreEligible exposes why a cycle declined', () => {
-  const scored = scoreEligible([clip(), clip({ clipId: 'c2', impressions: 5 })], DEFAULT_POLICY, NOW)
+test('scoreEligible exposes the raw mean alongside the conservative score', () => {
+  const scored = scoreEligible([clip(), clip({ clipId: 'c2', reach: 5 })], DEFAULT_POLICY, NOW)
   assert.equal(scored.length, 1, 'only the eligible clip is scored')
-  assert.equal(scored[0].clip.clipId, 'c1')
-  assert.ok(scored[0].score < scored[0].rawRetention, 'the bound is conservative')
+  assert.equal(scored[0].rawWatchFraction, 0.7, '3.5s of a 5s reel')
+  assert.ok(scored[0].score < scored[0].rawWatchFraction, 'the bound is conservative')
+})
+
+test('wilsonLowerBound is retained and correct for true proportions', () => {
+  // Kept for platforms that report completion counts, e.g. TikTok.
+  assert.ok(wilsonLowerBound(2, 2, 1.96) < wilsonLowerBound(800, 1000, 1.96))
+  assert.equal(wilsonLowerBound(0, 0, 1.96), 0)
+  assert.throws(() => wilsonLowerBound(5, 2, 1.96), RangeError)
 })

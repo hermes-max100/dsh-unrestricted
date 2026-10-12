@@ -21,6 +21,8 @@
  */
 import { verifyRender } from './lib/verify-render.ts'
 import { verifyStill, normalizeStill } from './lib/stills.ts'
+import { PerformanceLog } from './lib/performance-log.ts'
+import { selectWinner, DEFAULT_POLICY } from './lib/select-winner.ts'
 import {
   ApprovalQueue,
   validateRightsBasis,
@@ -36,6 +38,9 @@ const USAGE = `usage:
   approve.ts reject <id> --reason <text>
   approve.ts verify-still <file> [--aspect 9:16 --min-width 1080 --min-height 1920]
   approve.ts normalize-still <in> <out> [--width 1080 --height 1920]
+  approve.ts record-performance <clipId> --posted-at <iso> --reach <n> --views <n> \
+      --avg-watch-time <seconds> --duration <seconds> --interactions <n>
+  approve.ts select-winner
 
   rights bases:
     --rights own-footage
@@ -240,6 +245,56 @@ switch (command) {
     if (!r.ok) die(`could not produce a usable still — ${r.reason}`)
     console.log('✓ normalized and verified')
     console.log(`  ${output}: ${r.facts.width}x${r.facts.height} (${r.facts.aspectRatio})`)
+    break
+  }
+
+  case 'record-performance': {
+    const clipId = positional[0]
+    if (!clipId) die('record-performance needs a clipId')
+    const num = (key: string): number => {
+      const raw = str(flags, key)
+      if (raw === undefined) die(`record-performance needs --${key}`)
+      const value = Number.parseFloat(raw)
+      if (!Number.isFinite(value)) die(`--${key} must be a number, got "${raw}"`)
+      return value
+    }
+    const postedAt = str(flags, 'posted-at')
+    if (!postedAt) die('record-performance needs --posted-at <iso timestamp>')
+
+    try {
+      const row = await new PerformanceLog().record({
+        clipId,
+        postedAt,
+        reach: num('reach'),
+        views: num('views'),
+        avgWatchTimeSeconds: num('avg-watch-time'),
+        durationSeconds: num('duration'),
+        interactions: num('interactions'),
+      })
+      const fraction = row.avgWatchTimeSeconds / row.durationSeconds
+      console.log(`✓ recorded ${row.clipId}`)
+      console.log(`  ${row.views} views, ${row.reach} reach, ` +
+        `${row.avgWatchTimeSeconds}s of ${row.durationSeconds}s watched ` +
+        `(${(fraction * 100).toFixed(1)}%)`)
+    } catch (error) {
+      die(error instanceof Error ? error.message : String(error))
+    }
+    break
+  }
+
+  case 'select-winner': {
+    const clips = await new PerformanceLog().latest()
+    const decision = selectWinner(clips, DEFAULT_POLICY)
+    if (decision.kind === 'no-winner') {
+      // Declining is a normal, successful outcome: exit 0, spend nothing.
+      console.log('⊘ no winner this cycle — generating no variants')
+      console.log(`  ${decision.reason}`)
+      console.log(`  evaluated ${decision.evaluated}, eligible ${decision.eligible}`)
+      break
+    }
+    console.log(`✓ winner: ${decision.clip.clipId}`)
+    console.log(`  ${decision.reason}`)
+    console.log(`  commission ${decision.variants} variant(s)`)
     break
   }
 
