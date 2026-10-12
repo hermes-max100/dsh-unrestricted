@@ -68,7 +68,8 @@ export function reduceRatio(width: number, height: number): string {
   return `${width / d}:${height / d}`
 }
 
-async function sha256File(path: string): Promise<string> {
+/** Exported so the stills module hashes identically. */
+export async function sha256File(path: string): Promise<string> {
   const hash = createHash('sha256')
   for await (const chunk of createReadStream(path)) hash.update(chunk)
   return hash.digest('hex')

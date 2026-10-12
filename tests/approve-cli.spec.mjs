@@ -132,6 +132,39 @@ test('show reports a queued render, and fails on an unknown id', async () => {
   assert.match(bad.out, /no queued render/)
 })
 
+test('verify-still passes a correct still and refuses a landscape one', async () => {
+  const good = join(fxDir, 'v.png'), bad = join(fxDir, 'l.png')
+  await run('ffmpeg', ['-nostdin', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=s=1080x1920', '-frames:v', '1', good])
+  await run('ffmpeg', ['-nostdin', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=s=1920x1080', '-frames:v', '1', bad])
+
+  const ok = await cli('verify-still', good, '--aspect', '9:16', '--min-width', '1080')
+  assert.equal(ok.code, 0, ok.out)
+  assert.match(ok.out, /still verified/)
+  assert.match(ok.out, /1080x1920 \(9:16\)/)
+
+  const no = await cli('verify-still', bad, '--aspect', '9:16')
+  assert.equal(no.code, 1)
+  assert.match(no.out, /not usable as a render input/)
+  assert.doesNotMatch(no.out, /✓/, 'no success marker on a refusal')
+})
+
+test('normalize-still converts a landscape still and verifies the output', async () => {
+  const src = join(fxDir, 'l2.png'), out = join(cwd, 'fixed.png')
+  await run('ffmpeg', ['-nostdin', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=s=1920x1080', '-frames:v', '1', src])
+  const r = await cli('normalize-still', src, out)
+  assert.equal(r.code, 0, r.out)
+  assert.match(r.out, /normalized and verified/)
+  assert.match(r.out, /1080x1920 \(9:16\)/)
+  // The normalized file then passes the input gate.
+  assert.equal((await cli('verify-still', out, '--aspect', '9:16', '--min-width', '1080')).code, 0)
+})
+
+test('normalize-still refuses a non-image input', async () => {
+  const r = await cli('normalize-still', join(fxDir, 'nope.png'), join(cwd, 'x.png'))
+  assert.equal(r.code, 1)
+  assert.match(r.out, /not a readable image/)
+})
+
 test('an unknown command prints usage and exits non-zero', async () => {
   const r = await cli('frobnicate')
   assert.equal(r.code, 1)

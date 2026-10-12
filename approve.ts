@@ -20,6 +20,7 @@
  * did not happen.
  */
 import { verifyRender } from './lib/verify-render.ts'
+import { verifyStill, normalizeStill } from './lib/stills.ts'
 import {
   ApprovalQueue,
   validateRightsBasis,
@@ -33,6 +34,8 @@ const USAGE = `usage:
   approve.ts enqueue <file> --provider <p> --model <m> --rights <basis> [checks]
   approve.ts approve <id> --by <name>
   approve.ts reject <id> --reason <text>
+  approve.ts verify-still <file> [--aspect 9:16 --min-width 1080 --min-height 1920]
+  approve.ts normalize-still <in> <out> [--width 1080 --height 1920]
 
   rights bases:
     --rights own-footage
@@ -206,6 +209,37 @@ switch (command) {
     } catch (error) {
       die(error instanceof Error ? error.message : String(error))
     }
+    break
+  }
+
+  case 'verify-still': {
+    const file = positional[0]
+    if (!file) die('verify-still needs a file path')
+    const r = await verifyStill(file, {
+      ...(str(flags, 'aspect') ? { expectAspectRatio: str(flags, 'aspect')! } : {}),
+      ...(str(flags, 'min-width') ? { minWidth: Number.parseInt(str(flags, 'min-width')!, 10) } : {}),
+      ...(str(flags, 'min-height') ? { minHeight: Number.parseInt(str(flags, 'min-height')!, 10) } : {}),
+    })
+    if (!r.ok) {
+      // Catching this here costs nothing; catching it after a render costs a render.
+      die(`still is not usable as a render input — ${r.reason}`)
+    }
+    console.log('✓ still verified')
+    console.log(`  ${r.facts.width}x${r.facts.height} (${r.facts.aspectRatio})  ` +
+      `${r.facts.codec}  ${r.facts.bytes} bytes`)
+    break
+  }
+
+  case 'normalize-still': {
+    const [input, output] = positional
+    if (!input || !output) die('normalize-still needs <in> and <out> paths')
+    const r = await normalizeStill(input, output, {
+      ...(str(flags, 'width') ? { width: Number.parseInt(str(flags, 'width')!, 10) } : {}),
+      ...(str(flags, 'height') ? { height: Number.parseInt(str(flags, 'height')!, 10) } : {}),
+    })
+    if (!r.ok) die(`could not produce a usable still — ${r.reason}`)
+    console.log('✓ normalized and verified')
+    console.log(`  ${output}: ${r.facts.width}x${r.facts.height} (${r.facts.aspectRatio})`)
     break
   }
 
