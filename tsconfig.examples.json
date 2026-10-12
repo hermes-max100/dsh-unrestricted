@@ -6,8 +6,15 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "allowImportingTsExtensions": true
   },
-  "include": ["index.ts", "runway.ts", "lib/**/*.ts"]
+  "include": [
+    "index.ts",
+    "runway.ts",
+    "approve.ts",
+    "lib/**/*.ts"
+  ]
 }

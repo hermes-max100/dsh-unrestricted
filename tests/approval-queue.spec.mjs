@@ -2,11 +2,11 @@ import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { verifyRender } from '../lib/verify-render.ts'
-import { ApprovalQueue } from '../lib/approval-queue.ts'
+import { ApprovalQueue, validateRightsBasis } from '../lib/approval-queue.ts'
 
 const run = promisify(execFile)
 let dir, verified, queueDir, q
@@ -27,7 +27,8 @@ beforeEach(async () => {
   q = new ApprovalQueue(queueDir)
 })
 
-const META = { provider: 'runway', model: 'h3_max', sourceRightsConfirmed: true }
+const OWN = { kind: 'own-footage' }
+const META = { provider: 'runway', model: 'h3_max', rights: OWN }
 
 test('a verified render enters the queue as pending', async () => {
   const entry = await q.enqueue(verified, META)
@@ -45,13 +46,55 @@ test('re-enqueuing identical content does not duplicate or reset it', async () =
   assert.equal((await q.state()).size, 1)
 })
 
-test('approval is refused when source rights were not confirmed', async () => {
-  const entry = await q.enqueue(verified, { ...META, sourceRightsConfirmed: false })
-  await assert.rejects(
-    () => q.approve(entry.id, 'carmelo'),
-    /source rights \/ likeness consent were not confirmed/,
+test('validateRightsBasis accepts own footage with nothing further', () => {
+  assert.equal(validateRightsBasis({ kind: 'own-footage' }), null)
+})
+
+test('validateRightsBasis requires a licensor and reference for licensed footage', () => {
+  assert.match(validateRightsBasis({ kind: 'licensed', licensor: '', licenseRef: 'r' }), /licensor/)
+  assert.match(validateRightsBasis({ kind: 'licensed', licensor: 'Pond5', licenseRef: '  ' }), /licenseRef/)
+  assert.equal(
+    validateRightsBasis({ kind: 'licensed', licensor: 'Pond5', licenseRef: 'INV-7781' }),
+    null,
   )
+})
+
+test('validateRightsBasis requires subject, consentRef and a real date', () => {
+  const base = { kind: 'subject-consent', subject: 'A. Person', consentRef: 'releases/ap.pdf', obtainedAt: '2026-10-01' }
+  assert.equal(validateRightsBasis(base), null)
+  assert.match(validateRightsBasis({ ...base, subject: '' }), /name of the person/)
+  assert.match(validateRightsBasis({ ...base, consentRef: '' }), /consentRef/)
+  assert.match(validateRightsBasis({ ...base, obtainedAt: 'whenever' }), /obtainedAt/)
+})
+
+test('validateRightsBasis rejects an absent basis', () => {
+  assert.match(validateRightsBasis(undefined), /no rights basis/)
+})
+
+test('approval is refused when the rights basis is incomplete', async () => {
+  // A likeness entry naming a subject but pointing at no release.
+  const entry = await q.enqueue(verified, {
+    ...META,
+    rights: { kind: 'subject-consent', subject: 'A. Person', consentRef: '', obtainedAt: '2026-10-01' },
+  })
+  await assert.rejects(() => q.approve(entry.id, 'carmelo'), /consentRef/)
   assert.equal((await q.get(entry.id)).status, 'pending', 'stays pending')
+})
+
+test('a complete subject-consent basis carries the evidence pointer and approves', async () => {
+  const entry = await q.enqueue(verified, {
+    ...META,
+    rights: {
+      kind: 'subject-consent',
+      subject: 'A. Person',
+      consentRef: 'releases/a-person-2026-10-01.pdf',
+      obtainedAt: '2026-10-01',
+    },
+  })
+  assert.equal(entry.rights.consentRef, 'releases/a-person-2026-10-01.pdf')
+  const approved = await q.approve(entry.id, 'carmelo')
+  assert.equal(approved.status, 'approved')
+  assert.equal(approved.rights.subject, 'A. Person', 'evidence stays linked to the entry')
 })
 
 test('approval succeeds once rights are confirmed', async () => {
@@ -93,6 +136,42 @@ test('state survives a fresh queue instance reading the same log', async () => {
   await q.approve(entry.id, 'carmelo')
   const reopened = new ApprovalQueue(queueDir)
   assert.equal((await reopened.get(entry.id)).status, 'approved', 'log is the source of truth')
+})
+
+test('an unambiguous prefix resolves like a git short hash', async () => {
+  const entry = await q.enqueue(verified, META)
+  const short = entry.id.slice(0, 12)
+  assert.equal(await q.resolveId(short), entry.id)
+  assert.equal((await q.get(short)).id, entry.id)
+  const approved = await q.approve(short, 'carmelo')
+  assert.equal(approved.status, 'approved', 'mutations accept a prefix too')
+})
+
+test('an ambiguous prefix is refused rather than guessed', async () => {
+  // Craft a log with two entries sharing a prefix; the queue reads JSONL.
+  const dir = await mkdtemp(join(tmpdir(), 'ambig-'))
+  const mk = (id) => JSON.stringify({
+    kind: 'enqueue',
+    entry: {
+      id, at: new Date().toISOString(), status: 'pending',
+      facts: { ...verified.facts, sha256: id },
+      provider: 'runway', model: 'h3_max', rights: { kind: 'own-footage' },
+    },
+  })
+  const a = 'abc111'.padEnd(64, '0')
+  const b = 'abc222'.padEnd(64, '0')
+  await writeFile(join(dir, '.approval-queue.jsonl'), mk(a) + '\n' + mk(b) + '\n')
+  const amb = new ApprovalQueue(dir)
+  assert.equal((await amb.state()).size, 2)
+  await assert.rejects(() => amb.resolveId('abc'), /ambiguous \(2 matches\)/)
+  assert.equal(await amb.resolveId('abc111'), a, 'a longer prefix still resolves')
+  assert.equal(await amb.get('abc'), undefined, 'get returns nothing rather than a guess')
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('a prefix matching nothing is refused', async () => {
+  await q.enqueue(verified, META)
+  await assert.rejects(() => q.resolveId('ffffff'), /no queued render/)
 })
 
 test('an absent log reads as an empty queue', async () => {

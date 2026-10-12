@@ -6,11 +6,13 @@
  *  1. Only a *verified* render can be queued. `enqueue` accepts the ok:true
  *     branch of a Verification, so an unverified file cannot reach the queue
  *     through the type system at all.
- *  2. Nothing is approved without an explicit rights confirmation.
- *     `sourceRightsConfirmed` is required on every entry and `approve` refuses
- *     without it. Publishing a likeness of an identifiable person without
- *     consent is the largest standing risk in this pipeline, so it is a gate
- *     in the code, not a note in a README.
+ *  2. Nothing is approved without a rights *record*. Every entry carries a
+ *     `RightsBasis` naming how the footage is cleared, and `approve` validates
+ *     it. A boolean can be ticked without being true; a basis has to point at
+ *     something — a licensor and license reference, or a named subject and a
+ *     reference to their signed release. Publishing a likeness of an
+ *     identifiable person without consent is the largest standing risk in this
+ *     pipeline, so the evidence lives on the queue entry.
  *
  * State is a fold over an append-only JSONL log, so the history of who
  * approved what, and when, survives as evidence.
@@ -22,6 +24,55 @@ import type { RenderFacts, Verification } from './verify-render.ts'
 export type VerifiedRender = Extract<Verification, { ok: true }>
 export type QueueStatus = 'pending' | 'approved' | 'rejected' | 'posted'
 
+/**
+ * How the source footage is cleared for publication.
+ *
+ * `subject-consent` is the case that matters for avatar work: when a real,
+ * identifiable person's likeness appears, a name and a pointer to their signed
+ * release are required. `consentRef` is that pointer — a file path, document id
+ * or URL for the release on file. It is deliberately not a free-text note.
+ */
+export type RightsBasis =
+  | { kind: 'own-footage'; note?: string }
+  | { kind: 'licensed'; licensor: string; licenseRef: string; note?: string }
+  | {
+      kind: 'subject-consent'
+      /** The identifiable person whose likeness appears. */
+      subject: string
+      /** Pointer to the signed release on file. */
+      consentRef: string
+      /** ISO-8601 date the consent was obtained. */
+      obtainedAt: string
+      note?: string
+    }
+
+/**
+ * Validate a rights basis. Returns null when valid, else why it is not.
+ * Kept separate from the queue so a UI can check before enqueueing.
+ */
+export function validateRightsBasis(basis: RightsBasis | undefined): string | null {
+  if (!basis) return 'no rights basis supplied'
+  if (basis.kind === 'own-footage') return null
+  if (basis.kind === 'licensed') {
+    if (!basis.licensor?.trim()) return 'licensed footage requires a licensor'
+    if (!basis.licenseRef?.trim()) return 'licensed footage requires a licenseRef'
+    return null
+  }
+  if (basis.kind === 'subject-consent') {
+    if (!basis.subject?.trim()) {
+      return 'subject-consent requires the name of the person depicted'
+    }
+    if (!basis.consentRef?.trim()) {
+      return 'subject-consent requires a consentRef pointing at the signed release'
+    }
+    if (!basis.obtainedAt?.trim() || Number.isNaN(Date.parse(basis.obtainedAt))) {
+      return 'subject-consent requires a valid obtainedAt date'
+    }
+    return null
+  }
+  return `unknown rights basis: ${JSON.stringify(basis)}`
+}
+
 export interface QueueEntry {
   /** The render's sha256. Identity is content, so a re-render is a new entry. */
   id: string
@@ -31,10 +82,10 @@ export interface QueueEntry {
   provider: string
   model: string
   /**
-   * Whether the operator has confirmed rights to the source footage and, where
-   * a real person's likeness appears, their consent. Required; blocks approval.
+   * How the source footage is cleared. Required; an invalid or absent basis
+   * blocks approval.
    */
-  sourceRightsConfirmed: boolean
+  rights: RightsBasis
   note?: string
 }
 
@@ -95,7 +146,7 @@ export class ApprovalQueue {
    */
   async enqueue(
     verified: VerifiedRender,
-    meta: { provider: string; model: string; sourceRightsConfirmed: boolean; note?: string },
+    meta: { provider: string; model: string; rights: RightsBasis; note?: string },
   ): Promise<QueueEntry> {
     const existing = (await this.state()).get(verified.facts.sha256)
     if (existing) return existing
@@ -107,39 +158,61 @@ export class ApprovalQueue {
       facts: verified.facts,
       provider: meta.provider,
       model: meta.model,
-      sourceRightsConfirmed: meta.sourceRightsConfirmed,
+      rights: meta.rights,
       ...(meta.note !== undefined ? { note: meta.note } : {}),
     }
     await this.append({ kind: 'enqueue', entry })
     return entry
   }
 
+  /**
+   * Resolve a full id or unambiguous prefix to a full id, git-style.
+   * The queue prints short prefixes, so every id-taking operation accepts one.
+   */
+  async resolveId(idOrPrefix: string): Promise<string> {
+    const state = await this.state()
+    if (state.has(idOrPrefix)) return idOrPrefix
+    const matches = [...state.keys()].filter((k) => k.startsWith(idOrPrefix))
+    if (matches.length === 1) return matches[0]!
+    if (matches.length === 0) throw new Error(`no queued render with id ${idOrPrefix}`)
+    throw new Error(
+      `id prefix ${idOrPrefix} is ambiguous (${matches.length} matches); use more characters`,
+    )
+  }
+
   async listPending(): Promise<QueueEntry[]> {
     return [...(await this.state()).values()].filter((e) => e.status === 'pending')
   }
 
-  async get(id: string): Promise<QueueEntry | undefined> {
-    return (await this.state()).get(id)
+  /** Accepts a full id or an unambiguous prefix. */
+  async get(idOrPrefix: string): Promise<QueueEntry | undefined> {
+    const state = await this.state()
+    if (state.has(idOrPrefix)) return state.get(idOrPrefix)
+    const matches = [...state.keys()].filter((k) => k.startsWith(idOrPrefix))
+    return matches.length === 1 ? state.get(matches[0]!) : undefined
   }
 
   /** Approve for posting. Refuses unless rights were confirmed at enqueue. */
-  async approve(id: string, by: string): Promise<QueueEntry> {
+  async approve(idOrPrefix: string, by: string): Promise<QueueEntry> {
+    const id = await this.resolveId(idOrPrefix)
     const entry = (await this.state()).get(id)
     if (!entry) throw new Error(`no queued render with id ${id}`)
     if (entry.status === 'rejected') {
       throw new Error(`render ${id} was rejected; re-render rather than approving`)
     }
-    if (!entry.sourceRightsConfirmed) {
+    const invalid = validateRightsBasis(entry.rights)
+    if (invalid !== null) {
       throw new Error(
-        `render ${id} cannot be approved: source rights / likeness consent ` +
-          `were not confirmed. Confirm rights at enqueue time.`,
+        `render ${id} cannot be approved: ${invalid}. ` +
+          `Re-enqueue with a complete rights basis.`,
       )
     }
     await this.append({ kind: 'approve', id, at: new Date().toISOString(), by })
     return (await this.state()).get(id)!
   }
 
-  async reject(id: string, reason: string): Promise<QueueEntry> {
+  async reject(idOrPrefix: string, reason: string): Promise<QueueEntry> {
+    const id = await this.resolveId(idOrPrefix)
     const entry = (await this.state()).get(id)
     if (!entry) throw new Error(`no queued render with id ${id}`)
     await this.append({ kind: 'reject', id, at: new Date().toISOString(), reason })
@@ -147,7 +220,8 @@ export class ApprovalQueue {
   }
 
   /** Mark as posted. Only an approved render may be posted. */
-  async markPosted(id: string): Promise<QueueEntry> {
+  async markPosted(idOrPrefix: string): Promise<QueueEntry> {
+    const id = await this.resolveId(idOrPrefix)
     const entry = (await this.state()).get(id)
     if (!entry) throw new Error(`no queued render with id ${id}`)
     if (entry.status !== 'approved') {

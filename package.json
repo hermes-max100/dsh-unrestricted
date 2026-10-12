@@ -53,7 +53,8 @@
     "dump-prompts": "node tools/dump-prompts.mjs --repo ../../deepseek-harness --out tests/fixtures",
     "higgsfield:example": "node --env-file=.env.local index.ts",
     "runway:example": "node --env-file=.env.local runway.ts",
-    "examples:typecheck": "tsc -p tsconfig.examples.json"
+    "examples:typecheck": "tsc -p tsconfig.examples.json",
+    "approve": "node approve.ts"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
