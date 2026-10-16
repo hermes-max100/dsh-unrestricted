@@ -38,6 +38,7 @@ const USAGE = `usage:
   approve.ts reject <id> --reason <text>
   approve.ts verify-still <file> [--aspect 9:16 --min-width 1080 --min-height 1920]
   approve.ts normalize-still <in> <out> [--width 1080 --height 1920]
+      [--fit cover|pad] [--pad-color auto|white|#rrggbb]
   approve.ts record-performance <clipId> --posted-at <iso> --reach <n> --views <n> \
       --avg-watch-time <seconds> --duration <seconds> --interactions <n>
   approve.ts select-winner
@@ -238,9 +239,15 @@ switch (command) {
   case 'normalize-still': {
     const [input, output] = positional
     if (!input || !output) die('normalize-still needs <in> and <out> paths')
+    const fit = str(flags, 'fit')
+    if (fit !== undefined && fit !== 'cover' && fit !== 'pad') {
+      die(`--fit must be cover or pad, got "${fit}"`)
+    }
     const r = await normalizeStill(input, output, {
       ...(str(flags, 'width') ? { width: Number.parseInt(str(flags, 'width')!, 10) } : {}),
       ...(str(flags, 'height') ? { height: Number.parseInt(str(flags, 'height')!, 10) } : {}),
+      ...(fit ? { fit } : {}),
+      ...(str(flags, 'pad-color') ? { padColor: str(flags, 'pad-color')! } : {}),
     })
     if (!r.ok) die(`could not produce a usable still — ${r.reason}`)
     console.log('✓ normalized and verified')
